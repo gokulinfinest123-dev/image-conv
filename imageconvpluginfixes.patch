@@ -1,0 +1,114 @@
+diff --git a/wp-plugin/imageconv/includes/api.php b/wp-plugin/imageconv/includes/api.php
+index 71dc166..8a088ce 100644
+--- a/wp-plugin/imageconv/includes/api.php
++++ b/wp-plugin/imageconv/includes/api.php
+@@ -18,7 +18,7 @@ function imageconv_api_request( $method, $path, $args = [] ) {
+     $params = [
+         'method'  => strtoupper( $method ),
+         'headers' => $headers,
+-        'timeout' => 20,
++        'timeout' => isset( $args['timeout'] ) ? (int) $args['timeout'] : 20,
+     ];
+     if ( ! empty( $args['query'] ) ) {
+         $url = add_query_arg( $args['query'], $url );
+@@ -51,5 +51,5 @@ function imageconv_get_product( $asin ) {
+ }
+ 
+ function imageconv_materialize( $asin ) {
+-    return imageconv_api_request( 'POST', '/materialize/' . rawurlencode( $asin ) );
++    return imageconv_api_request( 'POST', '/materialize/' . rawurlencode( $asin ), [ 'timeout' => 90 ] );
+ }
+diff --git a/wp-plugin/imageconv/includes/cart-order.php b/wp-plugin/imageconv/includes/cart-order.php
+index 3779469..53d276d 100644
+--- a/wp-plugin/imageconv/includes/cart-order.php
++++ b/wp-plugin/imageconv/includes/cart-order.php
+@@ -5,7 +5,7 @@ defined( 'ABSPATH' ) || exit;
+  * Cart + order integration.
+  *
+  * "Add to cart" for a phantom product:
+- *   1. Force-materialize via the API (bypass cache).
++ *   1. Fetch cached product from the API; fall back to materialize on cache miss.
+  *   2. Create a WC product as `draft` — invisible to the public shop.
+  *   3. Add that product to the cart.
+  *   4. Redirect to checkout.
+@@ -35,7 +35,10 @@ add_action( 'template_redirect', function () {
+         wp_die( 'WooCommerce not available' );
+     }
+ 
+-    $data = imageconv_materialize( $asin );
++    $data = imageconv_get_product( $asin );
++    if ( is_wp_error( $data ) || ! is_array( $data ) || ( ( $data['status'] ?? '' ) !== 'ready' ) ) {
++        $data = imageconv_materialize( $asin );
++    }
+     if ( is_wp_error( $data ) ) {
+         wp_die( 'Could not prepare product: ' . esc_html( $data->get_error_message() ) );
+     }
+diff --git a/wp-plugin/imageconv/includes/product-page.php b/wp-plugin/imageconv/includes/product-page.php
+index 6e54048..a3158c2 100644
+--- a/wp-plugin/imageconv/includes/product-page.php
++++ b/wp-plugin/imageconv/includes/product-page.php
+@@ -41,12 +41,12 @@ function imageconv_render_phantom_product_page( $asin ) {
+     $product = isset( $data['product'] ) ? $data['product'] : null;
+ 
+     get_header();
+-    echo '<main class="site-main"><div class="asb-single-product" style="max-width:1200px;margin:2rem auto;padding:0 1rem;">';
++    echo '<div id="primary" class="content-area primary"><main id="main" class="site-main">';
++    echo '<div class="ast-container">';
+ 
+     if ( $status !== 'ready' || ! $product ) {
+-        // Auto-refresh every 6s while the background job runs
+         echo '<meta http-equiv="refresh" content="6" />';
+-        echo '<div style="text-align:center;padding:4rem 1rem;">';
++        echo '<div class="entry-content" style="text-align:center;padding:4rem 1rem;">';
+         echo '<h1>Preparing your product…</h1>';
+         echo '<p>This usually takes under a minute. This page will refresh automatically.</p>';
+         echo '<p style="opacity:.7">Status: <code>' . esc_html( $status ) . '</code></p>';
+@@ -55,7 +55,7 @@ function imageconv_render_phantom_product_page( $asin ) {
+         imageconv_render_ready_product( $asin, $product );
+     }
+ 
+-    echo '</div></main>';
++    echo '</div></main></div>';
+     get_footer();
+ }
+ 
+@@ -77,14 +77,21 @@ function imageconv_render_ready_product( $asin, $product ) {
+         'imageconv_add_to_cart_' . $asin
+     );
+ 
+-    echo '<div class="product" style="display:grid;grid-template-columns:1fr 1fr;gap:2rem;">';
+-    echo '<div class="asb-image">';
++    echo '<div class="woocommerce">';
++    echo '<div class="product type-product">';
++
++    echo '<div class="woocommerce-product-gallery woocommerce-product-gallery--with-images images">';
+     if ( $img ) {
+-        echo '<img src="' . esc_url( $img ) . '" alt="' . esc_attr( $title ) . '" style="width:100%;height:auto;border-radius:8px;" />';
++        echo '<figure class="woocommerce-product-gallery__wrapper">';
++        echo '<div class="woocommerce-product-gallery__image">';
++        echo '<img src="' . esc_url( $img ) . '" alt="' . esc_attr( $title ) . '" />';
++        echo '</div>';
++        echo '</figure>';
+     }
+     echo '</div>';
+-    echo '<div class="asb-summary">';
+-    echo '<h1 class="product_title">' . esc_html( $title ) . '</h1>';
++
++    echo '<div class="summary entry-summary">';
++    echo '<h1 class="product_title entry-title">' . esc_html( $title ) . '</h1>';
+     if ( $price !== null ) {
+         echo '<p class="price"><span class="woocommerce-Price-amount amount">' .
+             esc_html( $cur ) . ' ' . esc_html( number_format_i18n( (float) $price, 2 ) ) .
+@@ -93,7 +100,11 @@ function imageconv_render_ready_product( $asin, $product ) {
+     echo '<div class="woocommerce-product-details__short-description">';
+     echo wp_kses_post( wpautop( $desc ) );
+     echo '</div>';
+-    echo '<p><a href="' . esc_url( $add_url ) . '" class="single_add_to_cart_button button alt">Add to cart</a></p>';
++    echo '<form class="cart" method="get" action="' . esc_url( $add_url ) . '">';
++    echo '<a href="' . esc_url( $add_url ) . '" class="single_add_to_cart_button button alt">Add to cart</a>';
++    echo '</form>';
++    echo '</div>';
++
+     echo '</div>';
+     echo '</div>';
+ }
