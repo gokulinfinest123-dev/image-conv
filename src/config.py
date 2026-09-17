@@ -45,5 +45,19 @@ class Config:
     col_description: str = _get("COL_DESCRIPTION", "description")
     col_image_url: str = _get("COL_IMAGE_URL", "image_url")
 
+    # Optional columns for schemas that don't have a plain description field
+    # (e.g. Brand/Model/Selling-Price/Discount scrapes). Leave blank to disable
+    # the feature that depends on it.
+    col_brand: str = _get("COL_BRAND", "")
+    col_gallery_image_urls: str = _get("COL_GALLERY_IMAGE_URLS", "")
+    col_selling_price: str = _get("COL_SELLING_PRICE", "")
+    col_discount_pct: str = _get("COL_DISCOUNT_PCT", "")
+    col_mrp: str = _get("COL_MRP", "MRP (INR)")
+    gallery_url_separator: str = _get("GALLERY_URL_SEPARATOR", "|")
+
+    # false = do not call the AI image-edit provider at all; just re-encode
+    # the original image(s) with EXIF stripped + fake EXIF injected.
+    generate_images: bool = _get("GENERATE_IMAGES", "true").lower() == "true"
+
 
 CFG = Config()

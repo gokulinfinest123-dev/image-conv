@@ -7,7 +7,7 @@ import re
 from anthropic import AsyncAnthropic
 
 from .config import CFG
-from .prompts import REWRITE_SYSTEM, rewrite_user_prompt
+from .prompts import GENERATE_SYSTEM, REWRITE_SYSTEM, generate_user_prompt, rewrite_user_prompt
 
 
 _client: AsyncAnthropic | None = None
@@ -55,3 +55,29 @@ async def rewrite(title: str, description: str) -> tuple[str, str]:
                 return title, description
             await asyncio.sleep(2 ** attempt)
     return title, description
+
+
+async def generate_from_title_brand(title: str, brand: str) -> tuple[str, str]:
+    """Write a fresh title + description from title/brand alone, for schemas
+    that have no description field to rewrite."""
+    if not CFG.rewrite_copy or not title.strip():
+        return title, ""
+    client = _get_client()
+    for attempt in range(3):
+        try:
+            resp = await client.messages.create(
+                model=CFG.anthropic_model,
+                max_tokens=1024,
+                system=GENERATE_SYSTEM,
+                messages=[{"role": "user", "content": generate_user_prompt(title, brand)}],
+            )
+            text = "".join(
+                block.text for block in resp.content if getattr(block, "type", "") == "text"
+            )
+            parsed = _extract_json(text)
+            return str(parsed.get("title", title)), str(parsed.get("description", ""))
+        except (json.JSONDecodeError, KeyError):
+            if attempt == 2:
+                return title, ""
+            await asyncio.sleep(2 ** attempt)
+    return title, ""

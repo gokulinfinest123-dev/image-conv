@@ -64,3 +64,27 @@ def rewrite_user_prompt(title: str, description: str) -> str:
         f"ORIGINAL TITLE:\n{title}\n\n"
         f"ORIGINAL DESCRIPTION:\n{description}\n"
     )
+
+
+GENERATE_SYSTEM = (
+    "You write e-commerce product titles and descriptions from a source title "
+    "and brand name alone — no original description is given. You extract "
+    "every factual detail already present in the source title (model numbers, "
+    "features, specs, color, capacity, compatibility) and preserve them with "
+    "100% fidelity. You never invent specs that are not implied by the given "
+    "title or brand. You produce a polished catalog-ready title and a "
+    "persuasive 2-4 sentence description, written in fresh wording that would "
+    "not match the source title under text-similarity checks."
+)
+
+
+def generate_user_prompt(title: str, brand: str) -> str:
+    return (
+        "Write a new product title and a new product description for the "
+        "listing below. No original description is available — write the "
+        "description entirely from the facts stated in the title and brand.\n\n"
+        "Return valid JSON with exactly two keys: \"title\" and "
+        "\"description\". No prose, no markdown, no code fences.\n\n"
+        f"SOURCE TITLE:\n{title}\n\n"
+        f"BRAND:\n{brand or 'unknown'}\n"
+    )
