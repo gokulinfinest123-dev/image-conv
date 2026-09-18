@@ -190,6 +190,7 @@ async def materialize(
                 ],
             )
             out[SINGLE_IMAGE_COL] = main_and_gallery[0]
+            out[CFG.col_image_url] = main_and_gallery[0]
             if gallery_urls:
                 out[CFG.col_gallery_image_urls] = _join_gallery(main_and_gallery[1:])
 
