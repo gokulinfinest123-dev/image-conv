@@ -59,5 +59,18 @@ class Config:
     # the original image(s) with EXIF stripped + fake EXIF injected.
     generate_images: bool = _get("GENERATE_IMAGES", "true").lower() == "true"
 
+    # Nested per-variant list (e.g. "Weight Variants": [{"Weight":...,
+    # "ASIN":...}, ...]). Leave COL_VARIANTS_LIST blank to disable — each
+    # variant dict gets a new_<COL_VARIANT_ASIN> key added alongside its
+    # existing fields, which are otherwise left untouched.
+    col_variants_list: str = _get("COL_VARIANTS_LIST", "")
+    col_variant_asin: str = _get("COL_VARIANT_ASIN", "ASIN")
+
+    # Comma-separated top-level field names to drop from the output row
+    # entirely (e.g. "Rating,Reviews Count,Best Sellers Rank").
+    drop_columns: tuple[str, ...] = tuple(
+        c.strip() for c in _get("DROP_COLUMNS", "").split(",") if c.strip()
+    )
+
 
 CFG = Config()

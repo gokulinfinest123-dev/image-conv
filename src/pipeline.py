@@ -59,6 +59,22 @@ def _join_gallery(urls: list[str]) -> str:
     return f" {CFG.gallery_url_separator} ".join(urls)
 
 
+def _generate_variant_asins(variants: list) -> list:
+    """Add a new_<COL_VARIANT_ASIN> key to each variant dict, keeping every
+    other field (Weight, Selling Price, the real ASIN, ...) untouched."""
+    new_key = NEW_ID_COL_PREFIX + CFG.col_variant_asin
+    out_variants = []
+    for v in variants:
+        if not isinstance(v, dict):
+            out_variants.append(v)
+            continue
+        v = dict(v)
+        variant_id = str(v.get(CFG.col_variant_asin, "")).strip()
+        v[new_key] = _new_asin_like(variant_id)
+        out_variants.append(v)
+    return out_variants
+
+
 def _compute_mrp(row: dict) -> float | None:
     """MRP = Selling Price ÷ (1 − Discount%). Only used when the row doesn't
     already carry an MRP and both source columns are configured."""
@@ -143,6 +159,14 @@ async def materialize(
             out.setdefault(_variant_col(i), "")
     else:
         out.setdefault(SINGLE_IMAGE_COL, "")
+
+    for col in CFG.drop_columns:
+        out.pop(col, None)
+
+    if CFG.col_variants_list:
+        variants = row.get(CFG.col_variants_list)
+        if isinstance(variants, list):
+            out[CFG.col_variants_list] = _generate_variant_asins(variants)
 
     if row.get(CFG.col_mrp) in (None, ""):
         mrp = _compute_mrp(row)
