@@ -8,6 +8,7 @@ import traceback
 import httpx
 from tqdm.asyncio import tqdm_asyncio
 
+from .asin_mapping import write_mapping_from_output
 from .config import CFG
 from .content_rewrite import generate_from_title_brand, rewrite
 from .image_variations import generate_variations, make_provider
@@ -51,28 +52,20 @@ def _new_asin_like(original: str) -> str:
     return f"B0{body}"
 
 
+def _new_id_column() -> str:
+    return CFG.new_id_column_name or (NEW_ID_COL_PREFIX + CFG.col_id)
+
+
+def _variant_id_column() -> str:
+    return CFG.new_id_column_name or (NEW_ID_COL_PREFIX + CFG.col_variant_asin)
+
+
 def _split_gallery(raw: str) -> list[str]:
     return [u.strip() for u in raw.split(CFG.gallery_url_separator) if u.strip()]
 
 
 def _join_gallery(urls: list[str]) -> str:
     return f" {CFG.gallery_url_separator} ".join(urls)
-
-
-def _generate_variant_asins(variants: list) -> list:
-    """Add a new_<COL_VARIANT_ASIN> key to each variant dict, keeping every
-    other field (Weight, Selling Price, the real ASIN, ...) untouched."""
-    new_key = NEW_ID_COL_PREFIX + CFG.col_variant_asin
-    out_variants = []
-    for v in variants:
-        if not isinstance(v, dict):
-            out_variants.append(v)
-            continue
-        v = dict(v)
-        variant_id = str(v.get(CFG.col_variant_asin, "")).strip()
-        v[new_key] = _new_asin_like(variant_id)
-        out_variants.append(v)
-    return out_variants
 
 
 def _compute_mrp(row: dict) -> float | None:
@@ -93,8 +86,7 @@ def _compute_mrp(row: dict) -> float | None:
 def build_fieldnames(rows: list[dict]) -> list[str]:
     """Union of every key across every input row, in first-seen order, plus
     the pipeline's added columns. Used as CSV header — irrelevant for JSON."""
-    new_id_col = NEW_ID_COL_PREFIX + CFG.col_id
-    priority = [CFG.col_id, new_id_col, CFG.col_title]
+    priority = [CFG.col_id, _new_id_column(), CFG.col_title]
     priority.append(CFG.col_description or FALLBACK_DESCRIPTION_COL)
     priority.append(CFG.col_image_url)
 
@@ -128,6 +120,50 @@ async def _process_and_upload(raw: bytes, new_id: str, idx: int) -> str:
     return await upload(key, scrubbed, ctype)
 
 
+async def _process_variant_image(url: str, http: httpx.AsyncClient, new_id: str) -> str:
+    raw = await download_bytes(url, http)
+    return await _process_and_upload(raw, new_id, 1)
+
+
+async def _process_one_variant(v, http: httpx.AsyncClient, brand: str):
+    """Add the new-ID column, and — if configured and present on this
+    variant — scrub+replace its own image and rewrite its own title.
+    Every other field on the variant is left untouched."""
+    if not isinstance(v, dict):
+        return v
+    v = dict(v)
+    variant_id = str(v.get(CFG.col_variant_asin, "")).strip()
+    v[_variant_id_column()] = _new_asin_like(variant_id)
+
+    image_task = None
+    if CFG.col_variant_image_url:
+        url = str(v.get(CFG.col_variant_image_url, "") or "").strip()
+        if url:
+            image_task = asyncio.create_task(
+                _process_variant_image(url, http, v[_variant_id_column()])
+            )
+
+    title_task = None
+    if CFG.col_variant_title:
+        vt = str(v.get(CFG.col_variant_title, "") or "").strip()
+        if vt:
+            title_task = asyncio.create_task(generate_from_title_brand(vt, brand))
+
+    if image_task is not None:
+        v[CFG.col_variant_image_url] = await image_task
+    if title_task is not None:
+        new_title, _ = await title_task
+        v[CFG.col_variant_title] = new_title
+
+    return v
+
+
+async def _process_variants(variants: list, http: httpx.AsyncClient, brand: str) -> list:
+    return list(
+        await asyncio.gather(*[_process_one_variant(v, http, brand) for v in variants])
+    )
+
+
 async def materialize(
     row: dict,
     provider,
@@ -148,11 +184,10 @@ async def materialize(
         else []
     )
 
-    new_id_col = NEW_ID_COL_PREFIX + CFG.col_id
     new_id = _new_asin_like(pid)
 
     out: dict = dict(row)
-    out[new_id_col] = new_id
+    out[_new_id_column()] = new_id
     out["error"] = ""
     if CFG.generate_images:
         for i in range(1, CFG.variations_per_image + 1):
@@ -162,11 +197,6 @@ async def materialize(
 
     for col in CFG.drop_columns:
         out.pop(col, None)
-
-    if CFG.col_variants_list:
-        variants = row.get(CFG.col_variants_list)
-        if isinstance(variants, list):
-            out[CFG.col_variants_list] = _generate_variant_asins(variants)
 
     if row.get(CFG.col_mrp) in (None, ""):
         mrp = _compute_mrp(row)
@@ -202,8 +232,15 @@ async def materialize(
             gallery_bytes_task = asyncio.gather(
                 *[download_bytes(u, http) for u in gallery_urls]
             )
-            (new_title, new_desc), gallery_raw = await asyncio.gather(
-                copy_task, gallery_bytes_task
+            variants_raw = row.get(CFG.col_variants_list) if CFG.col_variants_list else None
+            variants_task = (
+                _process_variants(variants_raw, http, brand)
+                if isinstance(variants_raw, list)
+                else asyncio.sleep(0, result=None)
+            )
+
+            (new_title, new_desc), gallery_raw, processed_variants = await asyncio.gather(
+                copy_task, gallery_bytes_task, variants_task
             )
 
             main_and_gallery = await asyncio.gather(
@@ -217,6 +254,8 @@ async def materialize(
             out[CFG.col_image_url] = main_and_gallery[0]
             if gallery_urls:
                 out[CFG.col_gallery_image_urls] = _join_gallery(main_and_gallery[1:])
+            if processed_variants is not None:
+                out[CFG.col_variants_list] = processed_variants
 
         out[CFG.col_title] = new_title
         if CFG.col_description:
@@ -264,3 +303,7 @@ async def run(input_path: str, output_path: str) -> None:
         await tqdm_asyncio.gather(*tasks, desc="Products")
 
     finalize_output(output_path)
+
+    if CFG.asin_mapping_path:
+        write_mapping_from_output(output_path, CFG.asin_mapping_path)
+        print(f"ASIN mapping written to {CFG.asin_mapping_path}")
