@@ -291,7 +291,7 @@ async def run(input_path: str, output_path: str) -> None:
     print(f"Loaded {len(rows)} rows; {len(done)} already processed; {len(todo)} to do.")
 
     if not todo:
-        finalize_output(output_path)
+        finalize_output(output_path, CFG.col_id)
         return
 
     provider = make_provider() if CFG.generate_images else None
@@ -302,7 +302,7 @@ async def run(input_path: str, output_path: str) -> None:
         ]
         await tqdm_asyncio.gather(*tasks, desc="Products")
 
-    finalize_output(output_path)
+    finalize_output(output_path, CFG.col_id)
 
     if CFG.asin_mapping_path:
         write_mapping_from_output(output_path, CFG.asin_mapping_path)
