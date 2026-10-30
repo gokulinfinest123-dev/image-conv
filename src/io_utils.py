@@ -115,7 +115,7 @@ def finalize_output(output_path: str, id_field: str = "id") -> None:
         json.dump(rows, f, ensure_ascii=False, indent=2)
 
 
-@retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=1, min=2, max=16))
+@retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=2, max=30))
 async def download_bytes(url: str, client: httpx.AsyncClient) -> bytes:
     r = await client.get(url, timeout=60, follow_redirects=True)
     r.raise_for_status()
