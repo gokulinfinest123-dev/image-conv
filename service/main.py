@@ -54,7 +54,7 @@ def _require_key(x_api_key: str | None = Header(default=None)) -> None:
 async def _startup() -> None:
     app.state.catalog = Catalog(CATALOG_PATH)
     app.state.cache = Cache(CACHE_DB_PATH)
-    app.state.provider = make_provider()
+    app.state.provider = make_provider() if CFG.generate_images else None
     app.state.http = httpx.AsyncClient()
     app.state.inflight: dict[str, asyncio.Task] = {}
     logger.info("catalog loaded: %d rows", len(app.state.catalog))
