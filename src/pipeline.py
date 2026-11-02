@@ -128,8 +128,15 @@ async def _process_variant_image(url: str, http: httpx.AsyncClient, new_id: str)
 async def _process_one_variant(v, http: httpx.AsyncClient, brand: str):
     """Add the new-ID column, and — if configured and present on this
     variant — scrub+replace its own image and rewrite its own title.
-    Every other field on the variant is left untouched."""
+    Every other field on the variant is left untouched.
+
+    A variant that already carries the id column (from an earlier run) is
+    returned as-is — no re-download, no re-upload, no AI call — so re-running
+    the pipeline over previously-processed output only pays for variants it
+    hasn't touched yet."""
     if not isinstance(v, dict):
+        return v
+    if str(v.get(_variant_id_column(), "")).strip():
         return v
     v = dict(v)
     variant_id = str(v.get(CFG.col_variant_asin, "")).strip()
@@ -172,7 +179,14 @@ async def materialize(
     """Run the pipeline against a single input row and return the processed
     output dict. Pure computation — no locks, no file I/O. Safe to call from
     a web handler. Errors are caught and reported in the returned dict's
-    `error` field so callers always get a usable row."""
+    `error` field so callers always get a usable row.
+
+    A row that already carries the id column from a prior successful run
+    (no `error`) has its top-level image/title/description left untouched —
+    no re-download, no re-upload, no AI call. This makes it cheap to re-run
+    the pipeline over its own previous output: nested variant lists (see
+    below) still get checked and any variant that isn't done yet still gets
+    processed, but a row that's already correct doesn't cost anything again."""
     pid = str(row.get(CFG.col_id, "")).strip()
     title = str(row.get(CFG.col_title, "") or "")
     desc = str(row.get(CFG.col_description, "") or "") if CFG.col_description else ""
@@ -184,84 +198,95 @@ async def materialize(
         else []
     )
 
-    new_id = _new_asin_like(pid)
+    id_col = _new_id_column()
+    already_done = bool(str(row.get(id_col, "")).strip()) and not row.get("error")
 
     out: dict = dict(row)
-    out[_new_id_column()] = new_id
     out["error"] = ""
-    if CFG.generate_images:
-        for i in range(1, CFG.variations_per_image + 1):
-            out.setdefault(_variant_col(i), "")
-    else:
-        out.setdefault(SINGLE_IMAGE_COL, "")
 
-    for col in CFG.drop_columns:
-        out.pop(col, None)
+    if not already_done:
+        new_id = _new_asin_like(pid)
+        out[id_col] = new_id
+        if CFG.generate_images:
+            for i in range(1, CFG.variations_per_image + 1):
+                out.setdefault(_variant_col(i), "")
+        else:
+            out.setdefault(SINGLE_IMAGE_COL, "")
 
-    if row.get(CFG.col_mrp) in (None, ""):
-        mrp = _compute_mrp(row)
-        if mrp is not None:
-            out[CFG.col_mrp] = mrp
+        for col in CFG.drop_columns:
+            out.pop(col, None)
+
+        if row.get(CFG.col_mrp) in (None, ""):
+            mrp = _compute_mrp(row)
+            if mrp is not None:
+                out[CFG.col_mrp] = mrp
+    new_id = out[id_col]
 
     try:
-        if not image_url:
-            raise ValueError("empty image_url")
+        if not already_done:
+            if not image_url:
+                raise ValueError("empty image_url")
 
-        source_bytes = await download_bytes(image_url, http)
+            source_bytes = await download_bytes(image_url, http)
 
-        if desc.strip():
-            copy_task = rewrite(title, desc)
-        elif brand.strip():
-            copy_task = generate_from_title_brand(title, brand)
-        else:
-            copy_task = rewrite(title, "")
+            if desc.strip():
+                copy_task = rewrite(title, desc)
+            elif brand.strip():
+                copy_task = generate_from_title_brand(title, brand)
+            else:
+                copy_task = rewrite(title, "")
 
-        if CFG.generate_images:
-            variants_task = generate_variations(
-                provider, source_bytes, CFG.variations_per_image
-            )
-            variants, (new_title, new_desc) = await asyncio.gather(
-                variants_task, copy_task
-            )
-            uploaded = await asyncio.gather(
-                *[_process_and_upload(v, new_id, i + 1) for i, v in enumerate(variants)]
-            )
-            for idx, url in enumerate(uploaded, start=1):
-                out[_variant_col(idx)] = url
-        else:
-            gallery_bytes_task = asyncio.gather(
-                *[download_bytes(u, http) for u in gallery_urls]
-            )
-            variants_raw = row.get(CFG.col_variants_list) if CFG.col_variants_list else None
-            variants_task = (
-                _process_variants(variants_raw, http, brand)
-                if isinstance(variants_raw, list)
-                else asyncio.sleep(0, result=None)
-            )
+            if CFG.generate_images:
+                variants_task = generate_variations(
+                    provider, source_bytes, CFG.variations_per_image
+                )
+                variants, (new_title, new_desc) = await asyncio.gather(
+                    variants_task, copy_task
+                )
+                uploaded = await asyncio.gather(
+                    *[
+                        _process_and_upload(v, new_id, i + 1)
+                        for i, v in enumerate(variants)
+                    ]
+                )
+                for idx, url in enumerate(uploaded, start=1):
+                    out[_variant_col(idx)] = url
+            else:
+                gallery_bytes_task = asyncio.gather(
+                    *[download_bytes(u, http) for u in gallery_urls]
+                )
+                (new_title, new_desc), gallery_raw = await asyncio.gather(
+                    copy_task, gallery_bytes_task
+                )
 
-            (new_title, new_desc), gallery_raw, processed_variants = await asyncio.gather(
-                copy_task, gallery_bytes_task, variants_task
-            )
+                main_and_gallery = await asyncio.gather(
+                    _process_and_upload(source_bytes, new_id, 1),
+                    *[
+                        _process_and_upload(raw, new_id, i + 2)
+                        for i, raw in enumerate(gallery_raw)
+                    ],
+                )
+                out[SINGLE_IMAGE_COL] = main_and_gallery[0]
+                out[CFG.col_image_url] = main_and_gallery[0]
+                if gallery_urls:
+                    out[CFG.col_gallery_image_urls] = _join_gallery(
+                        main_and_gallery[1:]
+                    )
 
-            main_and_gallery = await asyncio.gather(
-                _process_and_upload(source_bytes, new_id, 1),
-                *[
-                    _process_and_upload(raw, new_id, i + 2)
-                    for i, raw in enumerate(gallery_raw)
-                ],
-            )
-            out[SINGLE_IMAGE_COL] = main_and_gallery[0]
-            out[CFG.col_image_url] = main_and_gallery[0]
-            if gallery_urls:
-                out[CFG.col_gallery_image_urls] = _join_gallery(main_and_gallery[1:])
-            if processed_variants is not None:
-                out[CFG.col_variants_list] = processed_variants
+            out[CFG.col_title] = new_title
+            if CFG.col_description:
+                out[CFG.col_description] = new_desc
+            else:
+                out[FALLBACK_DESCRIPTION_COL] = new_desc
 
-        out[CFG.col_title] = new_title
-        if CFG.col_description:
-            out[CFG.col_description] = new_desc
-        else:
-            out[FALLBACK_DESCRIPTION_COL] = new_desc
+        # Nested per-variant lists are checked (and, per-variant, processed)
+        # independently of `already_done` above — a product can be fully
+        # done at the top level while a variant list added later (or newly
+        # named in COL_VARIANTS_LIST) still has unprocessed entries.
+        for list_name in CFG.col_variants_lists:
+            variants_raw = row.get(list_name)
+            if isinstance(variants_raw, list):
+                out[list_name] = await _process_variants(variants_raw, http, brand)
 
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"

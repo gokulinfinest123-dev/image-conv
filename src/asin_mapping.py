@@ -48,8 +48,8 @@ def build_mapping_rows(rows: list[dict]) -> list[tuple[str, str]]:
         if orig and new:
             pairs.append((orig, new))
 
-        if CFG.col_variants_list:
-            variants = row.get(CFG.col_variants_list)
+        for list_name in CFG.col_variants_lists:
+            variants = row.get(list_name)
             if isinstance(variants, list):
                 for v in variants:
                     if not isinstance(v, dict):

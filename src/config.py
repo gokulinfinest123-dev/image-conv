@@ -59,13 +59,19 @@ class Config:
     # the original image(s) with EXIF stripped + fake EXIF injected.
     generate_images: bool = _get("GENERATE_IMAGES", "true").lower() == "true"
 
-    # Nested per-variant list (e.g. "Weight Variants": [{"Weight":...,
-    # "ASIN":...}, ...]). Leave COL_VARIANTS_LIST blank to disable — each
-    # variant dict gets a new id column added alongside its existing fields.
+    # Nested per-variant list(s) (e.g. "Weight Variants": [{"Weight":...,
+    # "ASIN":...}, ...]). Comma-separated to cover more than one list on the
+    # same product (e.g. "Weight Variants,Size & Color Variants") — every
+    # list named here gets processed; any nested list NOT named here is left
+    # completely untouched, including its own image/ASIN/title. Leave
+    # COL_VARIANTS_LIST blank to disable the feature entirely. Each variant
+    # dict gets a new id column added alongside its existing fields.
     # COL_VARIANT_TITLE / COL_VARIANT_IMAGE_URL: if a variant carries its own
     # title/image, leave these set to also rewrite/scrub those per variant
     # (blank disables that sub-feature only).
-    col_variants_list: str = _get("COL_VARIANTS_LIST", "")
+    col_variants_lists: tuple[str, ...] = tuple(
+        c.strip() for c in _get("COL_VARIANTS_LIST", "").split(",") if c.strip()
+    )
     col_variant_asin: str = _get("COL_VARIANT_ASIN", "ASIN")
     col_variant_title: str = _get("COL_VARIANT_TITLE", "")
     col_variant_image_url: str = _get("COL_VARIANT_IMAGE_URL", "")
