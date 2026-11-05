@@ -76,6 +76,14 @@ class Config:
     col_variant_title: str = _get("COL_VARIANT_TITLE", "")
     col_variant_image_url: str = _get("COL_VARIANT_IMAGE_URL", "")
 
+    # If a variant carries its OWN gallery (e.g. "Size & Color Variants":
+    # [{"Gallery Image URLs": "url | url | ..."}]), leave this set to scrub
+    # +replace every URL in it too, same as the top-level gallery. Blank
+    # falls back to COL_GALLERY_IMAGE_URLS (the two commonly share the same
+    # field name); set it only if the variant's gallery field is named
+    # differently from the top-level one.
+    col_variant_gallery_image_urls: str = _get("COL_VARIANT_GALLERY_IMAGE_URLS", "")
+
     # Name of the generated-ID column, used both top-level and inside each
     # variant. Blank falls back to "new_<COL_ID>" / "new_<COL_VARIANT_ASIN>".
     new_id_column_name: str = _get("NEW_ID_COLUMN_NAME", "")

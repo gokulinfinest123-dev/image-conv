@@ -125,6 +125,17 @@ async def _process_variant_image(url: str, http: httpx.AsyncClient, new_id: str)
     return await _process_and_upload(raw, new_id, 1)
 
 
+async def _process_variant_gallery(
+    urls: list[str], http: httpx.AsyncClient, new_id: str
+) -> list[str]:
+    raw = await asyncio.gather(*[download_bytes(u, http) for u in urls])
+    return list(
+        await asyncio.gather(
+            *[_process_and_upload(r, new_id, i + 2) for i, r in enumerate(raw)]
+        )
+    )
+
+
 async def _process_one_variant(v, http: httpx.AsyncClient, brand: str):
     """Add the new-ID column, and — if configured and present on this
     variant — scrub+replace its own image and rewrite its own title.
@@ -150,6 +161,15 @@ async def _process_one_variant(v, http: httpx.AsyncClient, brand: str):
                 _process_variant_image(url, http, v[_variant_id_column()])
             )
 
+    gallery_col = CFG.col_variant_gallery_image_urls or CFG.col_gallery_image_urls
+    gallery_task = None
+    if gallery_col:
+        gallery_urls = _split_gallery(str(v.get(gallery_col, "") or ""))
+        if gallery_urls:
+            gallery_task = asyncio.create_task(
+                _process_variant_gallery(gallery_urls, http, v[_variant_id_column()])
+            )
+
     title_task = None
     if CFG.col_variant_title:
         vt = str(v.get(CFG.col_variant_title, "") or "").strip()
@@ -158,6 +178,8 @@ async def _process_one_variant(v, http: httpx.AsyncClient, brand: str):
 
     if image_task is not None:
         v[CFG.col_variant_image_url] = await image_task
+    if gallery_task is not None:
+        v[gallery_col] = _join_gallery(await gallery_task)
     if title_task is not None:
         new_title, _ = await title_task
         v[CFG.col_variant_title] = new_title
