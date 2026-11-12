@@ -28,6 +28,13 @@ class Config:
     anthropic_model: str = _get("ANTHROPIC_MODEL", "claude-opus-4-7")
     rewrite_copy: bool = _get("REWRITE_COPY", "true").lower() == "true"
 
+    # Which LLM does the title/description rewrite: "anthropic" (paid, the
+    # original default) or "groq" (free tier, no credit card — cloud-hosted
+    # open models like Llama, so no local install/training like Ollama).
+    copy_provider: str = _get("COPY_PROVIDER", "anthropic").lower()
+    groq_api_key: str = _get("GROQ_API_KEY", "")
+    groq_model: str = _get("GROQ_MODEL", "llama-3.3-70b-versatile")
+
     s3_endpoint_url: str = _get("S3_ENDPOINT_URL", "")
     s3_access_key_id: str = _get("S3_ACCESS_KEY_ID", "")
     s3_secret_access_key: str = _get("S3_SECRET_ACCESS_KEY", "")
