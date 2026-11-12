@@ -74,22 +74,25 @@ async def _chat_groq(system: str, user: str) -> str:
 @retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=2, max=30))
 async def _chat_ollama(system: str, user: str) -> str:
     """Local, no rate limit, no API key. Requires `ollama serve` running and
-    the model already pulled (`ollama pull <model>`)."""
+    the model already pulled (`ollama pull <model>`). Uses Ollama's native
+    /api/chat endpoint rather than its OpenAI-compat layer, since the latter
+    isn't available on every installed version."""
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
-            f"{CFG.ollama_base_url}/v1/chat/completions",
+            f"{CFG.ollama_base_url}/api/chat",
             json={
                 "model": CFG.ollama_model,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                "temperature": 0.7,
+                "stream": False,
+                "options": {"temperature": 0.7},
             },
         )
         resp.raise_for_status()
         data = resp.json()
-    return data["choices"][0]["message"]["content"]
+    return data["message"]["content"]
 
 
 async def _chat(system: str, user: str) -> str:
