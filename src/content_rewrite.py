@@ -62,7 +62,7 @@ async def _chat_groq(system: str, user: str) -> str:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                "temperature": 0.7,
+                "temperature": 0.9,
                 "max_tokens": 1024,
             },
         )
@@ -87,7 +87,7 @@ async def _chat_ollama(system: str, user: str) -> str:
                     {"role": "user", "content": user},
                 ],
                 "stream": False,
-                "options": {"temperature": 0.7},
+                "options": {"temperature": 0.9},
             },
         )
         if resp.status_code >= 400:
