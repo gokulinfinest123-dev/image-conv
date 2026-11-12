@@ -90,7 +90,11 @@ async def _chat_ollama(system: str, user: str) -> str:
                 "options": {"temperature": 0.7},
             },
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"Ollama {resp.status_code} from {CFG.ollama_base_url}/api/chat "
+                f"(model={CFG.ollama_model!r}): {resp.text}"
+            )
         data = resp.json()
     return data["message"]["content"]
 
