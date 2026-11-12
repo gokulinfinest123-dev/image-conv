@@ -2,8 +2,9 @@
 
 COPY_PROVIDER picks which one talks to:
 - "anthropic" (paid, the original default)
-- "groq" (free tier, no credit card — cloud-hosted open models, so there's
-  no local install/training step like running Ollama yourself would need)
+- "groq"      (free tier, no credit card, but rate-limited — cloud-hosted)
+- "ollama"    (free, zero rate limit — runs locally; needs Ollama installed
+  and the model pulled once with `ollama pull <model>`, no training involved)
 """
 
 import asyncio
@@ -70,9 +71,32 @@ async def _chat_groq(system: str, user: str) -> str:
     return data["choices"][0]["message"]["content"]
 
 
+@retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=2, max=30))
+async def _chat_ollama(system: str, user: str) -> str:
+    """Local, no rate limit, no API key. Requires `ollama serve` running and
+    the model already pulled (`ollama pull <model>`)."""
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(
+            f"{CFG.ollama_base_url}/v1/chat/completions",
+            json={
+                "model": CFG.ollama_model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.7,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    return data["choices"][0]["message"]["content"]
+
+
 async def _chat(system: str, user: str) -> str:
     if CFG.copy_provider == "groq":
         return await _chat_groq(system, user)
+    if CFG.copy_provider == "ollama":
+        return await _chat_ollama(system, user)
     return await _chat_anthropic(system, user)
 
 
