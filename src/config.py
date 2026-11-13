@@ -26,7 +26,10 @@ class Config:
 
     anthropic_api_key: str = _get("ANTHROPIC_API_KEY", "")
     anthropic_model: str = _get("ANTHROPIC_MODEL", "claude-opus-4-7")
-    rewrite_copy: bool = _get("REWRITE_COPY", "true").lower() == "true"
+    # false (default): no model is called at all — titles and descriptions
+    # stay exactly as in the input. true: the model writes descriptions
+    # (and titles too when REWRITE_TITLES=true).
+    rewrite_copy: bool = _get("REWRITE_COPY", "false").lower() == "true"
     # false (default): titles stay exactly as in the input, the model only
     # writes the description. true: titles are rewritten too.
     rewrite_titles: bool = _get("REWRITE_TITLES", "false").lower() == "true"
@@ -53,7 +56,7 @@ class Config:
     concurrency: int = int(_get("CONCURRENCY", "4"))
     # Image download+convert+upload jobs in flight across the whole run.
     # Uncapped, one product with hundreds of images trips CDN throttling.
-    image_concurrency: int = int(_get("IMAGE_CONCURRENCY", "8"))
+    image_concurrency: int = int(_get("IMAGE_CONCURRENCY", "16"))
     output_format: str = _get("OUTPUT_FORMAT", "webp").lower()
     output_quality: int = int(_get("OUTPUT_QUALITY", "85"))
 

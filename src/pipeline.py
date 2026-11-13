@@ -3,7 +3,9 @@
 import asyncio
 import random
 import string
+import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 from tqdm.asyncio import tqdm_asyncio
@@ -111,13 +113,19 @@ def build_fieldnames(rows: list[dict]) -> list[str]:
     return priority + middle + tail
 
 
+_images_done = 0
+
+
 async def _process_and_upload(raw: bytes, new_id: str, idx: int) -> str:
     """Strip original EXIF, inject fake EXIF, re-encode, upload. No AI call."""
+    global _images_done
     ext = CFG.output_format
     ctype = CONTENT_TYPES.get(ext, "application/octet-stream")
     scrubbed = await asyncio.to_thread(scrub_and_randomize, raw, ext, CFG.output_quality)
     key = make_key(new_id or "product", idx, ext)
-    return await upload(key, scrubbed, ctype)
+    url = await upload(key, scrubbed, ctype)
+    _images_done += 1
+    return url
 
 
 class RowImages:
@@ -190,7 +198,7 @@ async def _process_variants(variants: list, images: RowImages) -> list:
 
 
 def _pending_titles(variant_lists) -> list[str]:
-    if not CFG.col_variant_title or not CFG.rewrite_titles:
+    if not CFG.col_variant_title or not (CFG.rewrite_copy and CFG.rewrite_titles):
         return []
     return [
         title
@@ -212,7 +220,11 @@ def _apply_titles(source: list, processed: list, titles: dict[str, str]) -> list
     return processed
 
 
-async def _write_copy(title: str, desc: str, brand: str) -> tuple[str, str]:
+async def _write_copy(title: str, desc: str, brand: str) -> tuple[str, str] | None:
+    """None when copy rewriting is off: the row's title and description are
+    then left exactly as the input had them."""
+    if not CFG.rewrite_copy:
+        return None
     if desc.strip():
         return await rewrite(title, desc)
     if brand.strip():
@@ -277,7 +289,7 @@ async def materialize(
     async def top_level(copy: asyncio.Future) -> dict:
         if CFG.generate_images:
             source_bytes = await download_bytes(image_url, http)
-            variants, (new_title, new_desc) = await asyncio.gather(
+            variants, written = await asyncio.gather(
                 generate_variations(provider, source_bytes, CFG.variations_per_image),
                 copy,
             )
@@ -286,7 +298,7 @@ async def materialize(
             )
             fields = {_variant_col(idx): url for idx, url in enumerate(uploaded, start=1)}
         else:
-            (new_title, new_desc), main, *gallery = await asyncio.gather(
+            written, main, *gallery = await asyncio.gather(
                 copy,
                 images.convert(image_url, new_id, 1),
                 *[images.convert(u, new_id, i + 2) for i, u in enumerate(gallery_urls)],
@@ -294,8 +306,10 @@ async def materialize(
             fields = {SINGLE_IMAGE_COL: main, CFG.col_image_url: main}
             if gallery_urls:
                 fields[CFG.col_gallery_image_urls] = _join_gallery(gallery)
-        fields[CFG.col_title] = new_title
-        fields[CFG.col_description or FALLBACK_DESCRIPTION_COL] = new_desc
+        if written is not None:
+            new_title, new_desc = written
+            fields[CFG.col_title] = new_title
+            fields[CFG.col_description or FALLBACK_DESCRIPTION_COL] = new_desc
         return fields
 
     # Everything this row starts, so a failure can stop the rest instead of
@@ -375,6 +389,12 @@ async def run(input_path: str, output_path: str) -> None:
         return
 
     provider = make_provider() if CFG.generate_images else None
+    # Image encoding and S3 uploads run in worker threads; the default pool
+    # (cpu_count + 4) would cap IMAGE_CONCURRENCY well below what's asked.
+    asyncio.get_running_loop().set_default_executor(
+        ThreadPoolExecutor(max_workers=CFG.image_concurrency + 4)
+    )
+    started = time.perf_counter()
     sem = asyncio.Semaphore(CFG.concurrency)
     image_limit = asyncio.Semaphore(CFG.image_concurrency)
     async with httpx.AsyncClient() as http:
@@ -385,6 +405,11 @@ async def run(input_path: str, output_path: str) -> None:
         await tqdm_asyncio.gather(*tasks, desc="Products")
 
     finalize_output(output_path, CFG.col_id)
+    elapsed = time.perf_counter() - started
+    print(
+        f"Done: {len(todo)} products, {_images_done} images in {elapsed:.0f}s "
+        f"({_images_done / max(elapsed, 0.001):.1f} images/s)"
+    )
 
     if CFG.asin_mapping_path:
         write_mapping_from_output(output_path, CFG.asin_mapping_path)
