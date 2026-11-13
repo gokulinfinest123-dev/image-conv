@@ -190,7 +190,7 @@ async def _process_variants(variants: list, images: RowImages) -> list:
 
 
 def _pending_titles(variant_lists) -> list[str]:
-    if not CFG.col_variant_title:
+    if not CFG.col_variant_title or not CFG.rewrite_titles:
         return []
     return [
         title

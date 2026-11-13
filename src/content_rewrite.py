@@ -17,9 +17,13 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from .config import CFG
 from .prompts import (
+    DESCRIBE_GENERATE_SYSTEM,
+    DESCRIBE_REWRITE_SYSTEM,
     GENERATE_SYSTEM,
     REWRITE_SYSTEM,
     VARIANT_BATCH_SYSTEM,
+    describe_generate_user_prompt,
+    describe_rewrite_user_prompt,
     generate_user_prompt,
     rewrite_user_prompt,
     variant_batch_user_prompt,
@@ -155,9 +159,30 @@ def _extract_json(text: str) -> dict:
     return json.loads(text)
 
 
+async def _write_description(system: str, user: str, fallback: str) -> str:
+    """Ask the model for just a description; `fallback` if it never answers properly."""
+    for attempt in range(3):
+        try:
+            parsed = _extract_json(await _chat(system, user))
+            text = parsed.get("description")
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+        except (json.JSONDecodeError, KeyError, AttributeError):
+            pass
+        if attempt < 2:
+            await asyncio.sleep(2 ** attempt)
+    return fallback
+
+
 async def rewrite(title: str, description: str) -> tuple[str, str]:
     if not CFG.rewrite_copy:
         return title, description
+    if not CFG.rewrite_titles:
+        if description.strip():
+            return title, await _write_description(
+                DESCRIBE_REWRITE_SYSTEM, describe_rewrite_user_prompt(title, description), description
+            )
+        return await generate_from_title_brand(title, "")
     if not title.strip() and not description.strip():
         return title, description
     for attempt in range(3):
@@ -207,7 +232,7 @@ async def rewrite_titles(titles: list[str], brand: str) -> dict[str, str]:
     Variants of one product mostly repeat the same few titles, and one call
     per variant is brutal against a local model that answers serially."""
     unique = list(dict.fromkeys(titles))
-    if not CFG.rewrite_copy or not unique:
+    if not CFG.rewrite_copy or not CFG.rewrite_titles or not unique:
         return {}
     rewritten: dict[str, str] = {}
     for start in range(0, len(unique), TITLE_CHUNK):
@@ -216,10 +241,14 @@ async def rewrite_titles(titles: list[str], brand: str) -> dict[str, str]:
 
 
 async def generate_from_title_brand(title: str, brand: str) -> tuple[str, str]:
-    """Write a fresh title + description from title/brand alone, for schemas
-    that have no description field to rewrite."""
+    """Write a description (and, with REWRITE_TITLES, a fresh title) from
+    title/brand alone, for schemas that have no description field to rewrite."""
     if not CFG.rewrite_copy or not title.strip():
         return title, ""
+    if not CFG.rewrite_titles:
+        return title, await _write_description(
+            DESCRIBE_GENERATE_SYSTEM, describe_generate_user_prompt(title, brand), ""
+        )
     for attempt in range(3):
         try:
             text = await _chat(GENERATE_SYSTEM, generate_user_prompt(title, brand))

@@ -27,6 +27,9 @@ class Config:
     anthropic_api_key: str = _get("ANTHROPIC_API_KEY", "")
     anthropic_model: str = _get("ANTHROPIC_MODEL", "claude-opus-4-7")
     rewrite_copy: bool = _get("REWRITE_COPY", "true").lower() == "true"
+    # false (default): titles stay exactly as in the input, the model only
+    # writes the description. true: titles are rewritten too.
+    rewrite_titles: bool = _get("REWRITE_TITLES", "false").lower() == "true"
 
     # Which LLM does the title/description rewrite:
     # "anthropic" (paid, the original default)

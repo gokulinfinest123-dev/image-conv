@@ -143,3 +143,46 @@ def generate_user_prompt(title: str, brand: str) -> str:
         f"SOURCE TITLE:\n{title}\n\n"
         f"BRAND:\n{brand or 'unknown'}\n"
     )
+
+
+DESCRIBE_REWRITE_SYSTEM = (
+    "You rewrite e-commerce product descriptions. You preserve every factual "
+    "claim (brand, model, materials, dimensions, capacity, quantity, "
+    "compatibility, certifications) with 100% fidelity and never invent "
+    "specs. Everything that is not a factual token must be reworded sentence "
+    "by sentence, as if a different copywriter wrote it from scratch — not "
+    "lightly edited."
+)
+
+
+def describe_rewrite_user_prompt(title: str, description: str) -> str:
+    return (
+        "Rewrite the product description below. Keep every fact exactly as "
+        "given; change the wording and sentence structure throughout. Do not "
+        "rewrite the title.\n\n"
+        "Return valid JSON with exactly one key: \"description\". No prose, "
+        "no markdown, no code fences.\n\n"
+        f"PRODUCT TITLE (for context only):\n{title}\n\n"
+        f"ORIGINAL DESCRIPTION:\n{description}\n"
+    )
+
+
+DESCRIBE_GENERATE_SYSTEM = (
+    "You write e-commerce product descriptions from a product title and "
+    "brand name alone — no original description is given. You use every "
+    "factual detail present in the title (model numbers, features, specs, "
+    "color, capacity, compatibility) verbatim and never invent specs that "
+    "are not implied by the title or brand. You write a persuasive 2-4 "
+    "sentence description."
+)
+
+
+def describe_generate_user_prompt(title: str, brand: str) -> str:
+    return (
+        "Write a product description for the listing below, entirely from "
+        "the facts stated in the title and brand. Do not write a new title.\n\n"
+        "Return valid JSON with exactly one key: \"description\". No prose, "
+        "no markdown, no code fences.\n\n"
+        f"TITLE:\n{title}\n\n"
+        f"BRAND:\n{brand or 'unknown'}\n"
+    )
