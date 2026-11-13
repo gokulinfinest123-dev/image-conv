@@ -10,7 +10,7 @@ from tqdm.asyncio import tqdm_asyncio
 
 from .asin_mapping import write_mapping_from_output
 from .config import CFG
-from .content_rewrite import generate_from_title_brand, rewrite
+from .content_rewrite import generate_from_title_brand, rewrite, rewrite_variant_titles_batch
 from .image_variations import generate_variations, make_provider
 from .io_utils import (
     already_processed_ids,
@@ -136,10 +136,10 @@ async def _process_variant_gallery(
     )
 
 
-async def _process_one_variant(v, http: httpx.AsyncClient, brand: str):
+async def _process_one_variant(v, http: httpx.AsyncClient, brand: str, title: str | None):
     """Add the new-ID column, and — if configured and present on this
-    variant — scrub+replace its own image and rewrite its own title.
-    Every other field on the variant is left untouched.
+    variant — scrub+replace its own image and apply its (already-rewritten,
+    batched) title. Every other field on the variant is left untouched.
 
     A variant that already carries the id column (from an earlier run) is
     returned as-is — no re-download, no re-upload, no AI call — so re-running
@@ -170,26 +170,47 @@ async def _process_one_variant(v, http: httpx.AsyncClient, brand: str):
                 _process_variant_gallery(gallery_urls, http, v[_variant_id_column()])
             )
 
-    title_task = None
-    if CFG.col_variant_title:
-        vt = str(v.get(CFG.col_variant_title, "") or "").strip()
-        if vt:
-            title_task = asyncio.create_task(generate_from_title_brand(vt, brand))
-
     if image_task is not None:
         v[CFG.col_variant_image_url] = await image_task
     if gallery_task is not None:
         v[gallery_col] = _join_gallery(await gallery_task)
-    if title_task is not None:
-        new_title, _ = await title_task
-        v[CFG.col_variant_title] = new_title
+    if title is not None:
+        v[CFG.col_variant_title] = title
 
     return v
 
 
 async def _process_variants(variants: list, http: httpx.AsyncClient, brand: str) -> list:
+    """Titles for every not-yet-done variant are rewritten in ONE LLM call
+    (see rewrite_variant_titles_batch) instead of one call per variant — a
+    product can carry dozens of variants, and a serial call per variant is
+    brutally slow against a local model that only handles one request at a
+    time. Images/galleries still process per-variant and concurrently,
+    since those are independent network calls, not LLM calls."""
+    needs_title: list[tuple[int, str]] = []
+    if CFG.col_variant_title:
+        for i, v in enumerate(variants):
+            if not isinstance(v, dict) or str(v.get(_variant_id_column(), "")).strip():
+                continue
+            vt = str(v.get(CFG.col_variant_title, "") or "").strip()
+            if vt:
+                needs_title.append((i, vt))
+
+    titles_by_index: dict[int, str] = {}
+    if needs_title:
+        rewritten = await rewrite_variant_titles_batch(
+            [t for _, t in needs_title], brand
+        )
+        for (i, _), new_title in zip(needs_title, rewritten):
+            titles_by_index[i] = new_title
+
     return list(
-        await asyncio.gather(*[_process_one_variant(v, http, brand) for v in variants])
+        await asyncio.gather(
+            *[
+                _process_one_variant(v, http, brand, titles_by_index.get(i))
+                for i, v in enumerate(variants)
+            ]
+        )
     )
 
 

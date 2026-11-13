@@ -98,6 +98,31 @@ GENERATE_SYSTEM = (
 )
 
 
+VARIANT_BATCH_SYSTEM = (
+    "You rewrite a batch of e-commerce product variant titles in one pass. "
+    "Every title in the batch belongs to the same product listing. For "
+    "EACH title, preserve every factual token (brand, model, size, color, "
+    "material, quantity, compatibility) verbatim, and reword everything "
+    "else — word order, adjectives, connecting words — so it reads as a "
+    "differently worded listing, not a lightly edited copy. A rewrite that "
+    "only swaps or drops one or two words for any entry is a FAILED "
+    "rewrite for that entry."
+)
+
+
+def variant_batch_user_prompt(titles: list[str], brand: str) -> str:
+    numbered = "\n".join(f"{i}: {t}" for i, t in enumerate(titles))
+    return (
+        f"Rewrite EVERY one of the {len(titles)} titles below. Return valid "
+        "JSON with exactly one key \"titles\": an array of exactly "
+        f"{len(titles)} strings, in the same order as given, each the "
+        "rewritten version of the title at that index. No prose, no "
+        "markdown, no code fences.\n\n"
+        f"BRAND:\n{brand or 'unknown'}\n\n"
+        f"TITLES:\n{numbered}\n"
+    )
+
+
 def generate_user_prompt(title: str, brand: str) -> str:
     return (
         "Write a new product title and a new product description for the "

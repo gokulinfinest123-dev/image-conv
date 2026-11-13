@@ -16,7 +16,14 @@ from anthropic import AsyncAnthropic
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .config import CFG
-from .prompts import GENERATE_SYSTEM, REWRITE_SYSTEM, generate_user_prompt, rewrite_user_prompt
+from .prompts import (
+    GENERATE_SYSTEM,
+    REWRITE_SYSTEM,
+    VARIANT_BATCH_SYSTEM,
+    generate_user_prompt,
+    rewrite_user_prompt,
+    variant_batch_user_prompt,
+)
 
 
 _anthropic_client: AsyncAnthropic | None = None
@@ -34,11 +41,11 @@ def _get_anthropic_client() -> AsyncAnthropic:
 
 
 @retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=2, max=30))
-async def _chat_anthropic(system: str, user: str) -> str:
+async def _chat_anthropic(system: str, user: str, max_tokens: int = 1024) -> str:
     client = _get_anthropic_client()
     resp = await client.messages.create(
         model=CFG.anthropic_model,
-        max_tokens=1024,
+        max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user}],
     )
@@ -46,7 +53,7 @@ async def _chat_anthropic(system: str, user: str) -> str:
 
 
 @retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=2, max=30))
-async def _chat_groq(system: str, user: str) -> str:
+async def _chat_groq(system: str, user: str, max_tokens: int = 1024) -> str:
     """Groq's free tier is rate-limited (requests/minute), so this retries
     with backoff on 429s and transient connection errors the same way
     download_bytes does for images."""
@@ -63,7 +70,7 @@ async def _chat_groq(system: str, user: str) -> str:
                     {"role": "user", "content": user},
                 ],
                 "temperature": 0.9,
-                "max_tokens": 1024,
+                "max_tokens": max_tokens,
             },
         )
         resp.raise_for_status()
@@ -99,12 +106,12 @@ async def _chat_ollama(system: str, user: str) -> str:
     return data["message"]["content"]
 
 
-async def _chat(system: str, user: str) -> str:
+async def _chat(system: str, user: str, max_tokens: int = 1024) -> str:
     if CFG.copy_provider == "groq":
-        return await _chat_groq(system, user)
+        return await _chat_groq(system, user, max_tokens)
     if CFG.copy_provider == "ollama":
         return await _chat_ollama(system, user)
-    return await _chat_anthropic(system, user)
+    return await _chat_anthropic(system, user, max_tokens)
 
 
 def _extract_json(text: str) -> dict:
@@ -131,6 +138,32 @@ async def rewrite(title: str, description: str) -> tuple[str, str]:
                 return title, description
             await asyncio.sleep(2 ** attempt)
     return title, description
+
+
+async def rewrite_variant_titles_batch(titles: list[str], brand: str) -> list[str]:
+    """Rewrite every variant title for a product in ONE LLM call instead of
+    one call per variant. A product can carry dozens of variants; one call
+    per variant means that many serial round-trips — brutal with a local
+    model like Ollama that only handles one request at a time. Falls back
+    to the original titles if the model doesn't return the right shape."""
+    if not CFG.rewrite_copy or not titles:
+        return titles
+    budget = max(1024, 80 * len(titles))
+    for attempt in range(3):
+        try:
+            text = await _chat(
+                VARIANT_BATCH_SYSTEM, variant_batch_user_prompt(titles, brand), budget
+            )
+            parsed = _extract_json(text)
+            result = parsed.get("titles")
+            if isinstance(result, list) and len(result) == len(titles):
+                return [str(t) for t in result]
+            return titles
+        except (json.JSONDecodeError, KeyError):
+            if attempt == 2:
+                return titles
+            await asyncio.sleep(2 ** attempt)
+    return titles
 
 
 async def generate_from_title_brand(title: str, brand: str) -> tuple[str, str]:
