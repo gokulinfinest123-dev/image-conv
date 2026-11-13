@@ -19,7 +19,10 @@ def _s3_client():
         "aws_access_key_id": CFG.s3_access_key_id,
         "aws_secret_access_key": CFG.s3_secret_access_key,
         "region_name": CFG.s3_region,
-        "config": BotoConfig(signature_version="s3v4"),
+        "config": BotoConfig(
+            signature_version="s3v4",
+            max_pool_connections=max(10, CFG.image_concurrency),
+        ),
     }
     if CFG.s3_endpoint_url:
         kwargs["endpoint_url"] = CFG.s3_endpoint_url

@@ -40,6 +40,7 @@ Everything in `.env`. Key knobs:
 - `IMAGE_PROVIDER` — `openai` (gpt-image-1) or `replicate` (Flux Kontext)
 - `VARIATIONS_PER_IMAGE` — default 3
 - `CONCURRENCY` — default 4 products in flight
+- `IMAGE_CONCURRENCY` — default 8 image downloads/uploads in flight across all products; lower it if the image host throttles you
 - `REWRITE_COPY` — set `false` to skip Claude rewrites
 - `COL_ID` / `COL_TITLE` / `COL_DESCRIPTION` / `COL_IMAGE_URL` — map your input columns
 

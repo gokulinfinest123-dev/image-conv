@@ -10,7 +10,7 @@ from tqdm.asyncio import tqdm_asyncio
 
 from .asin_mapping import write_mapping_from_output
 from .config import CFG
-from .content_rewrite import generate_from_title_brand, rewrite, rewrite_variant_titles_batch
+from .content_rewrite import generate_from_title_brand, rewrite, rewrite_titles
 from .image_variations import generate_variations, make_provider
 from .io_utils import (
     already_processed_ids,
@@ -120,104 +120,111 @@ async def _process_and_upload(raw: bytes, new_id: str, idx: int) -> str:
     return await upload(key, scrubbed, ctype)
 
 
-async def _process_variant_image(url: str, http: httpx.AsyncClient, new_id: str) -> str:
-    raw = await download_bytes(url, http)
-    return await _process_and_upload(raw, new_id, 1)
+class RowImages:
+    """Turns one product's source image URLs into scrubbed, uploaded copies.
+
+    A product's variants keep pointing at the same handful of pictures, so
+    each distinct URL is converted once and every reference shares the
+    result. `limit` caps conversions in flight; hand the same semaphore to
+    every product to cap the whole run."""
+
+    def __init__(self, http: httpx.AsyncClient, limit: asyncio.Semaphore):
+        self._http = http
+        self._limit = limit
+        self._tasks: dict[str, asyncio.Task] = {}
+
+    async def _convert(self, url: str, new_id: str, idx: int) -> str:
+        async with self._limit:
+            raw = await download_bytes(url, self._http)
+            return await _process_and_upload(raw, new_id, idx)
+
+    def convert(self, url: str, new_id: str, idx: int) -> asyncio.Task:
+        task = self._tasks.get(url)
+        if task is None:
+            task = self._tasks[url] = asyncio.create_task(self._convert(url, new_id, idx))
+        return task
+
+    def cancel(self) -> None:
+        for task in self._tasks.values():
+            task.cancel()
 
 
-async def _process_variant_gallery(
-    urls: list[str], http: httpx.AsyncClient, new_id: str
-) -> list[str]:
-    raw = await asyncio.gather(*[download_bytes(u, http) for u in urls])
-    return list(
-        await asyncio.gather(
-            *[_process_and_upload(r, new_id, i + 2) for i, r in enumerate(raw)]
-        )
-    )
+def _variant_pending(v) -> bool:
+    """A variant that already carries the id column was finished by an
+    earlier run and is left exactly as it is."""
+    return isinstance(v, dict) and not str(v.get(_variant_id_column(), "")).strip()
 
 
-async def _process_one_variant(v, http: httpx.AsyncClient, brand: str, title: str | None):
-    """Add the new-ID column, and — if configured and present on this
-    variant — scrub+replace its own image and apply its (already-rewritten,
-    batched) title. Every other field on the variant is left untouched.
+async def _process_one_variant(v, images: RowImages):
+    """Add the new-ID column and scrub+replace the variant's own image and
+    gallery. Every other field is left untouched (its title is rewritten
+    separately, batched with the product's other variants).
 
-    A variant that already carries the id column (from an earlier run) is
-    returned as-is — no re-download, no re-upload, no AI call — so re-running
-    the pipeline over previously-processed output only pays for variants it
-    hasn't touched yet."""
-    if not isinstance(v, dict):
-        return v
-    if str(v.get(_variant_id_column(), "")).strip():
+    A variant that isn't pending is returned as-is — the same object — so
+    re-running the pipeline over previously-processed output only pays for
+    variants it hasn't touched yet."""
+    if not _variant_pending(v):
         return v
     v = dict(v)
-    variant_id = str(v.get(CFG.col_variant_asin, "")).strip()
-    v[_variant_id_column()] = _new_asin_like(variant_id)
+    new_id = _new_asin_like(str(v.get(CFG.col_variant_asin, "")).strip())
+    v[_variant_id_column()] = new_id
 
-    image_task = None
-    if CFG.col_variant_image_url:
-        url = str(v.get(CFG.col_variant_image_url, "") or "").strip()
-        if url:
-            image_task = asyncio.create_task(
-                _process_variant_image(url, http, v[_variant_id_column()])
-            )
-
+    image_col = CFG.col_variant_image_url
+    image_url = str(v.get(image_col, "") or "").strip() if image_col else ""
     gallery_col = CFG.col_variant_gallery_image_urls or CFG.col_gallery_image_urls
-    gallery_task = None
-    if gallery_col:
-        gallery_urls = _split_gallery(str(v.get(gallery_col, "") or ""))
-        if gallery_urls:
-            gallery_task = asyncio.create_task(
-                _process_variant_gallery(gallery_urls, http, v[_variant_id_column()])
-            )
+    gallery_urls = _split_gallery(str(v.get(gallery_col, "") or "")) if gallery_col else []
 
-    if image_task is not None:
-        v[CFG.col_variant_image_url] = await image_task
-    if gallery_task is not None:
-        v[gallery_col] = _join_gallery(await gallery_task)
-    if title is not None:
-        v[CFG.col_variant_title] = title
+    jobs = [images.convert(image_url, new_id, 1)] if image_url else []
+    jobs += [images.convert(u, new_id, i + 2) for i, u in enumerate(gallery_urls)]
+    converted = await asyncio.gather(*jobs)
 
+    if image_url:
+        v[image_col] = converted.pop(0)
+    if gallery_urls:
+        v[gallery_col] = _join_gallery(converted)
     return v
 
 
-async def _process_variants(variants: list, http: httpx.AsyncClient, brand: str) -> list:
-    """Titles for every not-yet-done variant are rewritten in ONE LLM call
-    (see rewrite_variant_titles_batch) instead of one call per variant — a
-    product can carry dozens of variants, and a serial call per variant is
-    brutally slow against a local model that only handles one request at a
-    time. Images/galleries still process per-variant and concurrently,
-    since those are independent network calls, not LLM calls."""
-    needs_title: list[tuple[int, str]] = []
-    if CFG.col_variant_title:
-        for i, v in enumerate(variants):
-            if not isinstance(v, dict) or str(v.get(_variant_id_column(), "")).strip():
-                continue
-            vt = str(v.get(CFG.col_variant_title, "") or "").strip()
-            if vt:
-                needs_title.append((i, vt))
+async def _process_variants(variants: list, images: RowImages) -> list:
+    return list(await asyncio.gather(*[_process_one_variant(v, images) for v in variants]))
 
-    titles_by_index: dict[int, str] = {}
-    if needs_title:
-        rewritten = await rewrite_variant_titles_batch(
-            [t for _, t in needs_title], brand
-        )
-        for (i, _), new_title in zip(needs_title, rewritten):
-            titles_by_index[i] = new_title
 
-    return list(
-        await asyncio.gather(
-            *[
-                _process_one_variant(v, http, brand, titles_by_index.get(i))
-                for i, v in enumerate(variants)
-            ]
-        )
-    )
+def _pending_titles(variant_lists) -> list[str]:
+    if not CFG.col_variant_title:
+        return []
+    return [
+        title
+        for variants in variant_lists
+        for v in variants
+        if _variant_pending(v)
+        and (title := str(v.get(CFG.col_variant_title, "") or "").strip())
+    ]
+
+
+def _apply_titles(source: list, processed: list, titles: dict[str, str]) -> list:
+    if titles:
+        for before, after in zip(source, processed):
+            if after is before:
+                continue  # not processed this run
+            new = titles.get(str(before.get(CFG.col_variant_title, "") or "").strip())
+            if new:
+                after[CFG.col_variant_title] = new
+    return processed
+
+
+async def _write_copy(title: str, desc: str, brand: str) -> tuple[str, str]:
+    if desc.strip():
+        return await rewrite(title, desc)
+    if brand.strip():
+        return await generate_from_title_brand(title, brand)
+    return await rewrite(title, "")
 
 
 async def materialize(
     row: dict,
     provider,
     http: httpx.AsyncClient,
+    image_limit: asyncio.Semaphore | None = None,
 ) -> dict:
     """Run the pipeline against a single input row and return the processed
     output dict. Pure computation — no locks, no file I/O. Safe to call from
@@ -265,75 +272,79 @@ async def materialize(
                 out[CFG.col_mrp] = mrp
     new_id = out[id_col]
 
-    try:
-        if not already_done:
-            if not image_url:
-                raise ValueError("empty image_url")
+    images = RowImages(http, image_limit or asyncio.Semaphore(CFG.image_concurrency))
 
+    async def top_level(copy: asyncio.Future) -> dict:
+        if CFG.generate_images:
             source_bytes = await download_bytes(image_url, http)
+            variants, (new_title, new_desc) = await asyncio.gather(
+                generate_variations(provider, source_bytes, CFG.variations_per_image),
+                copy,
+            )
+            uploaded = await asyncio.gather(
+                *[_process_and_upload(v, new_id, i + 1) for i, v in enumerate(variants)]
+            )
+            fields = {_variant_col(idx): url for idx, url in enumerate(uploaded, start=1)}
+        else:
+            (new_title, new_desc), main, *gallery = await asyncio.gather(
+                copy,
+                images.convert(image_url, new_id, 1),
+                *[images.convert(u, new_id, i + 2) for i, u in enumerate(gallery_urls)],
+            )
+            fields = {SINGLE_IMAGE_COL: main, CFG.col_image_url: main}
+            if gallery_urls:
+                fields[CFG.col_gallery_image_urls] = _join_gallery(gallery)
+        fields[CFG.col_title] = new_title
+        fields[CFG.col_description or FALLBACK_DESCRIPTION_COL] = new_desc
+        return fields
 
-            if desc.strip():
-                copy_task = rewrite(title, desc)
-            elif brand.strip():
-                copy_task = generate_from_title_brand(title, brand)
-            else:
-                copy_task = rewrite(title, "")
-
-            if CFG.generate_images:
-                variants_task = generate_variations(
-                    provider, source_bytes, CFG.variations_per_image
-                )
-                variants, (new_title, new_desc) = await asyncio.gather(
-                    variants_task, copy_task
-                )
-                uploaded = await asyncio.gather(
-                    *[
-                        _process_and_upload(v, new_id, i + 1)
-                        for i, v in enumerate(variants)
-                    ]
-                )
-                for idx, url in enumerate(uploaded, start=1):
-                    out[_variant_col(idx)] = url
-            else:
-                gallery_bytes_task = asyncio.gather(
-                    *[download_bytes(u, http) for u in gallery_urls]
-                )
-                (new_title, new_desc), gallery_raw = await asyncio.gather(
-                    copy_task, gallery_bytes_task
-                )
-
-                main_and_gallery = await asyncio.gather(
-                    _process_and_upload(source_bytes, new_id, 1),
-                    *[
-                        _process_and_upload(raw, new_id, i + 2)
-                        for i, raw in enumerate(gallery_raw)
-                    ],
-                )
-                out[SINGLE_IMAGE_COL] = main_and_gallery[0]
-                out[CFG.col_image_url] = main_and_gallery[0]
-                if gallery_urls:
-                    out[CFG.col_gallery_image_urls] = _join_gallery(
-                        main_and_gallery[1:]
-                    )
-
-            out[CFG.col_title] = new_title
-            if CFG.col_description:
-                out[CFG.col_description] = new_desc
-            else:
-                out[FALLBACK_DESCRIPTION_COL] = new_desc
+    # Everything this row starts, so a failure can stop the rest instead of
+    # leaving LLM calls and uploads running for a row that's already lost.
+    work: list[asyncio.Future] = []
+    try:
+        if not already_done and not image_url:
+            raise ValueError("empty image_url")
 
         # Nested per-variant lists are checked (and, per-variant, processed)
         # independently of `already_done` above — a product can be fully
         # done at the top level while a variant list added later (or newly
         # named in COL_VARIANTS_LIST) still has unprocessed entries.
-        for list_name in CFG.col_variants_lists:
-            variants_raw = row.get(list_name)
-            if isinstance(variants_raw, list):
-                out[list_name] = await _process_variants(variants_raw, http, brand)
+        variant_lists = {
+            name: row[name]
+            for name in CFG.col_variants_lists
+            if isinstance(row.get(name), list)
+        }
+
+        # LLM calls and image work are independent, so they all start now
+        # and overlap rather than waiting on each other.
+        titles = asyncio.ensure_future(
+            rewrite_titles(_pending_titles(variant_lists.values()), brand)
+        )
+        work.append(titles)
+        top = None
+        if not already_done:
+            copy = asyncio.ensure_future(_write_copy(title, desc, brand))
+            top = asyncio.ensure_future(top_level(copy))
+            work += [copy, top]
+        lists = [
+            asyncio.ensure_future(_process_variants(variants, images))
+            for variants in variant_lists.values()
+        ]
+        work += lists
+        await asyncio.gather(*work)
+
+        if top is not None:
+            out.update(top.result())
+        for (name, variants), processed in zip(variant_lists.items(), lists):
+            out[name] = _apply_titles(variants, processed.result(), titles.result())
 
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"
         traceback.print_exc()
+    finally:
+        for task in work:
+            task.cancel()
+        images.cancel()
 
     return out
 
@@ -345,9 +356,10 @@ async def process_row(
     sem: asyncio.Semaphore,
     output_path: str,
     fieldnames: list[str],
+    image_limit: asyncio.Semaphore,
 ) -> None:
     async with sem:
-        out = await materialize(row, provider, http)
+        out = await materialize(row, provider, http, image_limit)
         append_output_row(output_path, out, fieldnames)
 
 
@@ -364,9 +376,11 @@ async def run(input_path: str, output_path: str) -> None:
 
     provider = make_provider() if CFG.generate_images else None
     sem = asyncio.Semaphore(CFG.concurrency)
+    image_limit = asyncio.Semaphore(CFG.image_concurrency)
     async with httpx.AsyncClient() as http:
         tasks = [
-            process_row(r, provider, http, sem, output_path, fieldnames) for r in todo
+            process_row(r, provider, http, sem, output_path, fieldnames, image_limit)
+            for r in todo
         ]
         await tqdm_asyncio.gather(*tasks, desc="Products")
 

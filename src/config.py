@@ -48,6 +48,9 @@ class Config:
 
     variations_per_image: int = int(_get("VARIATIONS_PER_IMAGE", "1"))
     concurrency: int = int(_get("CONCURRENCY", "4"))
+    # Image download+convert+upload jobs in flight across the whole run.
+    # Uncapped, one product with hundreds of images trips CDN throttling.
+    image_concurrency: int = int(_get("IMAGE_CONCURRENCY", "8"))
     output_format: str = _get("OUTPUT_FORMAT", "webp").lower()
     output_quality: int = int(_get("OUTPUT_QUALITY", "85"))
 

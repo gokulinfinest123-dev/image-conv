@@ -13,7 +13,7 @@ import re
 
 import httpx
 from anthropic import AsyncAnthropic
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from .config import CFG
 from .prompts import (
@@ -78,39 +78,71 @@ async def _chat_groq(system: str, user: str, max_tokens: int = 1024) -> str:
     return data["choices"][0]["message"]["content"]
 
 
-@retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=2, max=30))
-async def _chat_ollama(system: str, user: str) -> str:
+class _OllamaRejected(RuntimeError):
+    """Ollama refused the request (4xx, e.g. model not pulled) — a retry can't help."""
+
+
+_ollama_gate: tuple[asyncio.AbstractEventLoop, asyncio.Lock] | None = None
+
+
+def _ollama_turn() -> asyncio.Lock:
+    """One request at a time. A local model generates serially anyway, and a
+    request parked in Ollama's own queue burns its timeout doing nothing —
+    then gets retried from scratch."""
+    global _ollama_gate
+    loop = asyncio.get_running_loop()
+    if _ollama_gate is None or _ollama_gate[0] is not loop:
+        _ollama_gate = (loop, asyncio.Lock())
+    return _ollama_gate[1]
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=30),
+    # isinstance(Exception) keeps task cancellation from being "retried".
+    retry=retry_if_exception(
+        lambda e: isinstance(e, Exception) and not isinstance(e, _OllamaRejected)
+    ),
+    reraise=True,
+)
+async def _chat_ollama(system: str, user: str, max_tokens: int = 1024) -> str:
     """Local, no rate limit, no API key. Requires `ollama serve` running and
     the model already pulled (`ollama pull <model>`). Uses Ollama's native
     /api/chat endpoint rather than its OpenAI-compat layer, since the latter
     isn't available on every installed version."""
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(
-            f"{CFG.ollama_base_url}/api/chat",
-            json={
-                "model": CFG.ollama_model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "stream": False,
-                "options": {"temperature": 0.9},
-            },
-        )
-        if resp.status_code >= 400:
-            raise RuntimeError(
-                f"Ollama {resp.status_code} from {CFG.ollama_base_url}/api/chat "
-                f"(model={CFG.ollama_model!r}): {resp.text}"
+    async with _ollama_turn():
+        # CPU-only generation of a full answer can take minutes.
+        async with httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10)) as client:
+            resp = await client.post(
+                f"{CFG.ollama_base_url}/api/chat",
+                json={
+                    "model": CFG.ollama_model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "stream": False,
+                    # Guarantees parseable output; a small model otherwise
+                    # wraps JSON in prose and the whole answer is thrown away.
+                    "format": "json",
+                    "keep_alive": "30m",
+                    "options": {"temperature": 0.9, "num_predict": max_tokens},
+                },
             )
-        data = resp.json()
-    return data["message"]["content"]
+    if resp.status_code >= 400:
+        error = RuntimeError if resp.status_code >= 500 else _OllamaRejected
+        raise error(
+            f"Ollama {resp.status_code} from {CFG.ollama_base_url}/api/chat "
+            f"(model={CFG.ollama_model!r}): {resp.text}"
+        )
+    return resp.json()["message"]["content"]
 
 
 async def _chat(system: str, user: str, max_tokens: int = 1024) -> str:
     if CFG.copy_provider == "groq":
         return await _chat_groq(system, user, max_tokens)
     if CFG.copy_provider == "ollama":
-        return await _chat_ollama(system, user)
+        return await _chat_ollama(system, user, max_tokens)
     return await _chat_anthropic(system, user, max_tokens)
 
 
@@ -140,30 +172,47 @@ async def rewrite(title: str, description: str) -> tuple[str, str]:
     return title, description
 
 
-async def rewrite_variant_titles_batch(titles: list[str], brand: str) -> list[str]:
-    """Rewrite every variant title for a product in ONE LLM call instead of
-    one call per variant. A product can carry dozens of variants; one call
-    per variant means that many serial round-trips — brutal with a local
-    model like Ollama that only handles one request at a time. Falls back
-    to the original titles if the model doesn't return the right shape."""
-    if not CFG.rewrite_copy or not titles:
-        return titles
-    budget = max(1024, 80 * len(titles))
-    for attempt in range(3):
+# Titles per LLM call: small enough that prompt + answer fit a small local
+# model's default context window, so nothing gets silently truncated.
+TITLE_CHUNK = 8
+
+
+async def _rewrite_title_chunk(titles: list[str], brand: str) -> dict[str, str]:
+    done: dict[str, str] = {}
+    for _ in range(3):
+        todo = [t for t in titles if t not in done]
+        if not todo:
+            break
         try:
-            text = await _chat(
-                VARIANT_BATCH_SYSTEM, variant_batch_user_prompt(titles, brand), budget
+            parsed = _extract_json(
+                await _chat(VARIANT_BATCH_SYSTEM, variant_batch_user_prompt(todo, brand))
             )
-            parsed = _extract_json(text)
-            result = parsed.get("titles")
-            if isinstance(result, list) and len(result) == len(titles):
-                return [str(t) for t in result]
-            return titles
-        except (json.JSONDecodeError, KeyError):
-            if attempt == 2:
-                return titles
-            await asyncio.sleep(2 ** attempt)
-    return titles
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        for number, title in enumerate(todo, start=1):
+            new = parsed.get(str(number))
+            if isinstance(new, str) and new.strip() and new.strip() != title:
+                done[title] = new.strip()
+    for title in titles:
+        if title not in done:
+            done[title], _ = await generate_from_title_brand(title, brand)
+    return done
+
+
+async def rewrite_titles(titles: list[str], brand: str) -> dict[str, str]:
+    """Map each distinct title to its rewrite, several titles per LLM call.
+
+    Variants of one product mostly repeat the same few titles, and one call
+    per variant is brutal against a local model that answers serially."""
+    unique = list(dict.fromkeys(titles))
+    if not CFG.rewrite_copy or not unique:
+        return {}
+    rewritten: dict[str, str] = {}
+    for start in range(0, len(unique), TITLE_CHUNK):
+        rewritten.update(await _rewrite_title_chunk(unique[start:start + TITLE_CHUNK], brand))
+    return rewritten
 
 
 async def generate_from_title_brand(title: str, brand: str) -> tuple[str, str]:

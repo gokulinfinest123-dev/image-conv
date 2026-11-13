@@ -111,13 +111,12 @@ VARIANT_BATCH_SYSTEM = (
 
 
 def variant_batch_user_prompt(titles: list[str], brand: str) -> str:
-    numbered = "\n".join(f"{i}: {t}" for i, t in enumerate(titles))
+    numbered = "\n".join(f"{i}: {t}" for i, t in enumerate(titles, start=1))
     return (
-        f"Rewrite EVERY one of the {len(titles)} titles below. Return valid "
-        "JSON with exactly one key \"titles\": an array of exactly "
-        f"{len(titles)} strings, in the same order as given, each the "
-        "rewritten version of the title at that index. No prose, no "
-        "markdown, no code fences.\n\n"
+        f"Rewrite EVERY one of the {len(titles)} numbered titles below. Return "
+        f"valid JSON: one object with exactly {len(titles)} keys, the numbers "
+        f"\"1\" to \"{len(titles)}\", each mapped to the rewritten version of "
+        "the title with that number. No prose, no markdown, no code fences.\n\n"
         f"BRAND:\n{brand or 'unknown'}\n\n"
         f"TITLES:\n{numbered}\n"
     )
