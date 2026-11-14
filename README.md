@@ -41,7 +41,7 @@ Everything in `.env`. Key knobs:
 - `VARIATIONS_PER_IMAGE` — default 3
 - `CONCURRENCY` — default 4 products in flight
 - `IMAGE_CONCURRENCY` — default 16 image downloads/uploads in flight across all products; lower it if the image host throttles you
-- `REWRITE_COPY` — default `false`: no model is called, titles and descriptions stay as in the input. Set `true` to have the model write descriptions
+- `GENERATE_COPY` — default `false` (replaces the old `REWRITE_COPY`, which is no longer read): no model is called, titles and descriptions stay as in the input. Set `true` to have the model write descriptions
 - `REWRITE_TITLES` — default `false`: titles are kept exactly as in the input and only the description is written. Set `true` to rewrite titles (main and variants) too
 - `COL_ID` / `COL_TITLE` / `COL_DESCRIPTION` / `COL_IMAGE_URL` — map your input columns
 

@@ -27,9 +27,11 @@ class Config:
     anthropic_api_key: str = _get("ANTHROPIC_API_KEY", "")
     anthropic_model: str = _get("ANTHROPIC_MODEL", "claude-opus-4-7")
     # false (default): no model is called at all — titles and descriptions
-    # stay exactly as in the input. true: the model writes descriptions
-    # (and titles too when REWRITE_TITLES=true).
-    rewrite_copy: bool = _get("REWRITE_COPY", "false").lower() == "true"
+    # stay exactly as in the input, and Ollama/Groq/Anthropic don't need to
+    # be running. true: the model writes descriptions (and titles too when
+    # REWRITE_TITLES=true). Named GENERATE_COPY, not the old REWRITE_COPY, so
+    # a leftover REWRITE_COPY=true in an existing .env can't switch it back on.
+    rewrite_copy: bool = _get("GENERATE_COPY", "false").lower() == "true"
     # false (default): titles stay exactly as in the input, the model only
     # writes the description. true: titles are rewritten too.
     rewrite_titles: bool = _get("REWRITE_TITLES", "false").lower() == "true"
