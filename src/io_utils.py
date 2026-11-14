@@ -60,6 +60,8 @@ def append_output_row(output_path: str, row: dict, fieldnames: list[str]) -> Non
 
 
 def already_processed_ids(output_path: str, id_field: str = "id") -> set[str]:
+    """IDs that succeeded on a prior run. A row with a non-empty `error`
+    does NOT count as done — it's left out so the next run retries it."""
     p = _checkpoint_path(output_path)
     if not p.exists():
         return set()
@@ -72,33 +74,48 @@ def already_processed_ids(output_path: str, id_field: str = "id") -> set[str]:
                 if not line:
                     continue
                 r = json.loads(line)
-                if r.get(id_field):
+                if r.get(id_field) and not r.get("error"):
                     ids.add(str(r[id_field]))
         return ids
     with open(p, newline="", encoding="utf-8") as f:
-        return {r[id_field] for r in csv.DictReader(f) if r.get(id_field)}
+        return {
+            r[id_field]
+            for r in csv.DictReader(f)
+            if r.get(id_field) and not r.get("error")
+        }
 
 
-def finalize_output(output_path: str) -> None:
+def finalize_output(output_path: str, id_field: str = "id") -> None:
     """When the user asked for .json, aggregate the .jsonl checkpoint into a
-    single JSON array. Safe to call multiple times; no-op for csv/jsonl."""
+    single JSON array. Safe to call multiple times; no-op for csv/jsonl.
+
+    A retried row is appended after its earlier failed attempt, so when
+    collapsing to one row per ID, the LAST occurrence wins — the retry's
+    result (success or a newer error) replaces the stale one."""
     p = Path(output_path)
     if p.suffix.lower() != ".json":
         return
     ckpt = p.with_suffix(".jsonl")
     if not ckpt.exists():
         return
-    rows: list[dict] = []
+    by_id: dict[str, dict] = {}
+    order: list[str] = []
     with open(ckpt, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if line:
-                rows.append(json.loads(line))
+            if not line:
+                continue
+            row = json.loads(line)
+            key = str(row.get(id_field, "")) or f"__row_{len(order)}"
+            if key not in by_id:
+                order.append(key)
+            by_id[key] = row
+    rows = [by_id[k] for k in order]
     with open(p, "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=2)
 
 
-@retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=1, min=2, max=16))
+@retry(stop=stop_after_attempt(6), wait=wait_exponential(multiplier=2, min=2, max=30))
 async def download_bytes(url: str, client: httpx.AsyncClient) -> bytes:
     r = await client.get(url, timeout=60, follow_redirects=True)
     r.raise_for_status()

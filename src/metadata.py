@@ -52,7 +52,10 @@ def scrub_and_randomize(
     output_format: str = "webp",
     quality: int = 85,
 ) -> bytes:
-    """Re-encode image, wiping the original EXIF, then inject fresh fake EXIF.
+    """Re-encode image, wiping the original EXIF, and inject fresh fake EXIF.
+
+    Pillow only writes metadata that is passed to save() explicitly, so one
+    encode is enough to drop everything the source carried.
 
     Note: WebP preserves EXIF but not the full set of legacy tags — that's
     fine, the goal is: no original metadata + plausible new metadata.
@@ -61,13 +64,10 @@ def scrub_and_randomize(
     if src.mode not in ("RGB", "RGBA"):
         src = src.convert("RGB")
 
-    # First pass: re-encode into a scratch buffer with NO exif
-    scratch = io.BytesIO()
     save_kwargs = {"quality": quality}
     if output_format == "webp":
-        save_kwargs["method"] = 6
-    src.save(scratch, format=output_format.upper(), **save_kwargs)
-    scratch.seek(0)
+        # 4 is libwebp's default effort; 6 costs ~2x the CPU for <1% smaller files.
+        save_kwargs["method"] = 4
 
     # Build fake EXIF
     make, model = random.choice(CAMERA_MAKES)
@@ -99,15 +99,10 @@ def scrub_and_randomize(
     }
 
     try:
-        exif_bytes = piexif.dump(exif_dict)
+        save_kwargs["exif"] = piexif.dump(exif_dict)
     except Exception:
-        # If piexif can't produce it for some reason, return scrubbed image
-        return scratch.getvalue()
+        pass  # still scrubbed, just without the fake EXIF
 
-    # Second pass: reopen scratch and re-save with the fake exif attached
-    reopened = Image.open(scratch)
-    if reopened.mode not in ("RGB", "RGBA"):
-        reopened = reopened.convert("RGB")
     final = io.BytesIO()
-    reopened.save(final, format=output_format.upper(), exif=exif_bytes, **save_kwargs)
+    src.save(final, format=output_format.upper(), **save_kwargs)
     return final.getvalue()

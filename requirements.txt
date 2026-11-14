@@ -12,3 +12,4 @@ tqdm>=4.66
 fastapi>=0.115
 uvicorn[standard]>=0.30
 pydantic>=2.7
+openpyxl>=3.1
